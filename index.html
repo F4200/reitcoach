@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>KI-Reitcoach</title>
+<style>
+/* VOICE: ruhig, sachlich – ein Werkzeug für die Bande
+   IDEA: Trainer-Klemmbrett über dem Live-Bild
+   PICTURE: das Kamerabild selbst mit Kopflinie und Skelett
+   COLOUR: Hallen-Dunkel #111, Sand #e9dcc3, Signal rot/grün/blau
+   TYPE: System-Sans, große Werte; LAYOUT: Bild voll, Tafel oben links, Ansage unten */
+:root{--bg:#111;--ink:#f3efe6;--sand:#e9dcc3;--red:#d8443a;--green:#2f9e57;--blue:#2c6fb7;--mute:#9a958b}
+*{box-sizing:border-box;min-width:0}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.4 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
+#stage{position:fixed;inset:0}
+video,canvas#ov{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+#panel{position:absolute;top:calc(env(safe-area-inset-top) + 8px);left:8px;background:#000a;border-radius:10px;padding:8px 12px;min-width:220px;font-size:15px}
+#panel .row{display:flex;justify-content:space-between;gap:14px}
+#panel .v{font-weight:700;font-variant-numeric:tabular-nums}
+.bad{color:#ff7b70}.ok{color:#8be0a6}
+#gait{font-size:20px;font-weight:800;color:var(--sand)}
+#fps{color:var(--mute);font-size:12px}
+#banner{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 64px);padding:14px 18px;font-size:clamp(20px,5vw,30px);font-weight:800;display:none}
+#bar{position:absolute;left:0;right:0;bottom:0;padding:8px 8px calc(env(safe-area-inset-bottom) + 8px);display:flex;gap:8px;flex-wrap:wrap;background:#000c}
+button,select,label.btn{font:inherit;font-size:16px;min-height:44px;padding:0 14px;border-radius:10px;border:1px solid #444;background:#222;color:var(--ink)}
+button.main{background:var(--sand);color:#111;font-weight:800;border:0}
+button:focus-visible,select:focus-visible{outline:3px solid var(--sand)}
+#start{position:absolute;inset:0;display:grid;place-items:center;background:var(--bg);padding:24px}
+#start .card{max-width:520px}
+#start h1{font-size:34px;line-height:1.05;margin:0 0 10px}
+#start p{color:#cfc8ba;margin:0 0 14px}
+#start .btns{display:flex;flex-direction:column;gap:10px;margin-top:18px}
+#start button{min-height:54px;font-size:18px}
+#status{color:var(--sand);min-height:1.4em;margin-top:12px}
+#report{position:absolute;inset:0;background:var(--bg);overflow:auto;padding:calc(env(safe-area-inset-top) + 16px) 18px 90px;display:none}
+#report h2{margin:0 0 8px}
+#report table{border-collapse:collapse;width:100%;margin:10px 0}
+#report td{padding:6px 4px;border-bottom:1px solid #333}#report td+td{text-align:right}
+input[type=file]{display:none}
+@media (prefers-reduced-motion:no-preference){#banner{transition:opacity .3s}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="vid" playsinline muted></video>
+  <canvas id="ov"></canvas>
+  <div id="panel" hidden>
+    <div id="gait">Gangart: –</div>
+    <div class="row"><span>Pferd: Nase zur Senkrechten</span><span class="v" id="m-ang">–</span></div>
+    <div class="row"><span>Reiter: Blick nach unten</span><span class="v" id="m-gaze">–</span></div>
+    <div class="row"><span>Reiter: Oberkörper</span><span class="v" id="m-lean">–</span></div>
+    <div class="row"><span>Reiter: Handhöhe</span><span class="v" id="m-hand">–</span></div>
+    <div class="row"><span>Reiter: Ellbogen</span><span class="v" id="m-elbow">–</span></div>
+    <div class="row"><span>Reiter: Fuß vor Hüfte</span><span class="v" id="m-heel">–</span></div>
+    <div id="fps"></div>
+  </div>
+  <div id="banner"></div>
+  <div id="bar" hidden>
+    <button id="stop" class="main">Stopp &amp; Bericht</button>
+    <button id="mute">Ton an</button>
+    <select id="freq" aria-label="Ansagen">
+      <option value="ruhig">Ansagen: wenig</option>
+      <option value="normal" selected>Ansagen: normal</option>
+      <option value="viel">Ansagen: viel</option>
+    </select>
+    <button id="test">Testansage</button>
+  </div>
+</div>
+
+<div id="start">
+  <div class="card">
+    <h1>KI-Reitcoach</h1>
+    <p>Handy quer halten, Pferd und Reiter ganz im Bild. Kopfhörer der Reiterin mit diesem Handy per Bluetooth verbinden.</p>
+    <p>Die Ansagen sind ein Versuch – Sicherheit geht vor, ein Mensch bleibt in der Halle.</p>
+    <div class="btns">
+      <button id="go-cam" class="main">Live mit Kamera starten</button>
+      <label class="btn" for="file" style="display:flex;align-items:center;justify-content:center">Mit Video-Datei testen</label>
+      <input type="file" id="file" accept="video/*">
+    </div>
+    <div id="status">Lade Erkennung …</div>
+  </div>
+</div>
+
+<div id="report">
+  <h2>Bericht dieser Einheit</h2>
+  <div id="rep"></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button id="copy">Bericht kopieren</button>
+    <button id="again" class="main">Neue Einheit</button>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
