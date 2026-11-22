@@ -138,9 +138,9 @@ export function classifyGait(w) {
 
 // ---------- Ansagen ----------
 export const RULES = [
-  ['ang', v => v < -12, ['Hand vor, Nase raus.', 'Gib nach, lass sie vorne raus.', 'Zügel etwas länger, Hals lang machen.'], 'kopf'],
+  ['ang', v => v < -16, ['Hand vor, Nase raus.', 'Gib nach, lass sie vorne raus.', 'Zügel etwas länger, Hals lang machen.'], 'kopf'],
   ['gaze', v => v > 27, ['Blick hoch!', 'Schau nach vorne, zwischen den Ohren durch.', 'Kinn hoch, schau zum nächsten Buchstaben.'], 'blick'],
-  ['lean', v => v > 8, ['Oberkörper aufrichten.', 'Schultern zurück, mach dich groß.'], 'oberkoerper'],
+  ['lean', v => v > 6, ['Oberkörper aufrichten.', 'Schultern zurück, mach dich groß.', 'Ruhig sitzen bleiben, nicht vorbeugen.'], 'oberkoerper'],
   ['lean', v => v < -8, ['Nicht nach hinten lehnen, senkrecht sitzen.'], 'oberkoerper'],
   ['hand', v => v > 0.16, ['Hände tiefer.', 'Hände ruhig über dem Widerrist tragen.'], 'hand'],
   ['wsd', v => v > 0.075, ['Hände ruhig halten.', 'Hände stehen lassen, nicht mitwackeln.'], 'handruhe'],
@@ -204,15 +204,15 @@ export class Coach {
   after(r) {
     const t = r.t, o = this.opt;
     this.hist = this.hist.filter(x => x.t > t - 3); this.sig = this.sig.filter(x => x.t > t - 4.5);
-    const win = this.hist.filter(x => x.t > t - 2);
-    const med = k => { const v = win.filter(x => x[k] !== undefined).map(x => x[k]); return v.length >= 5 ? median(v) : null; };
+    const win = this.hist.filter(x => x.t > t - 3);
+    const med = k => { const v = win.filter(x => x[k] !== undefined).map(x => x[k]); return v.length >= 3 ? median(v) : null; };
     const m = {}; for (const k of ['ang', 'gaze', 'lean', 'hand', 'heel', 'elbow']) m[k] = med(k);
-    const hv = win.filter(x => x.hand !== undefined).map(x => x.hand); m.wsd = hv.length >= 6 ? std(hv) : null;
+    const hv = win.filter(x => x.hand !== undefined).map(x => x.hand); m.wsd = hv.length >= 5 ? std(hv) : null;
     r.m = m;
     // Gangart (jede Sekunde neu)
     if (t - this.lastGaitCalc >= 1) {
       this.lastGaitCalc = t; const s = this.sig;
-      if (s.length >= 14 && s[s.length - 1].t - s[0].t > 3.2) {
+      if (s.length >= 14 && s[s.length - 1].t - s[0].t > 3.2 && s.length / (s[s.length - 1].t - s[0].t) >= 4) {
         const tt = s.map(x => x.t), w = {};
         const a = spectrum(tt, s.map(x => x.asp)), b = spectrum(tt, s.map(x => x.hip));
         const hs = s.filter(x => x.head !== null), c = hs.length > 12 ? spectrum(hs.map(x => x.t), hs.map(x => x.head)) : null;
@@ -235,7 +235,7 @@ export class Coach {
       }
     }
     const faults = RULES.filter(([k, test]) => m[k] !== null && m[k] !== undefined && test(m[k]));
-    if (!msg && t - this.lastAny > o.gapAny && t - this.lastPraise > o.gapPraise && m.ang !== null && m.ang > -6 && faults.length <= 1) { msg = [pick(PRAISE), 'p']; this.lastPraise = t; }
+    if (!msg && t - this.lastAny > o.gapAny && t - this.lastPraise > o.gapPraise && m.ang !== null && m.ang > -9 && faults.length <= 1) { msg = [pick(PRAISE), 'p']; this.lastPraise = t; }
     if (!msg && t - this.lastAny > o.gapAny) for (const [k, test, ph, cat] of faults) if (t - (this.last[cat] ?? -99) > o.gapCat) { msg = [pick(ph), 'c']; this.last[cat] = t; break; }
     if (warm) msg = null;
     if (msg) this.lastAny = t;

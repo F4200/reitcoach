@@ -9,7 +9,7 @@ const status = t => $('status').textContent = t;
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
 let seg, pose;
-const VERSION = 'v1.0';
+const VERSION = 'v1.3';
 const ready = (async () => {
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
   // Modelle liegen in Teilen (Upload-Grenze) und werden hier zusammengesetzt
@@ -39,17 +39,37 @@ function getPatch(box) {
 }
 
 // ---------- Sprache ----------
-let voice = null, muted = false;
+// Ansagen als fertige Tondateien (laufen auf iOS über Kopfhörer wie Musik), Sprachsynthese nur als Notlösung
+let voice = null, muted = false, busyUntil = 0, nSaid = 0, unlocked = false, sIdx = { 'Coach startet.': 's00' };
+fetch('./sounds/index.json').then(r => r.json()).then(j => sIdx = j).catch(() => { });
+const sfx = new Audio(); sfx.preload = 'auto'; sfx.setAttribute('playsinline', '');
 function pickVoice() {
   const v = speechSynthesis.getVoices().filter(x => x.lang && x.lang.toLowerCase().startsWith('de'));
   const score = x => (/premium|erweitert|enhanced/i.test(x.name) ? 4 : 0) + (/anna|helena|petra|markus|yannick/i.test(x.name) ? 2 : 0) + (x.localService ? 1 : 0);
   voice = v.sort((a, b) => score(b) - score(a))[0] || null;
 }
 speechSynthesis.onvoiceschanged = pickVoice; pickVoice();
-function say(text) {
-  if (muted || speechSynthesis.speaking) return;
-  const u = new SpeechSynthesisUtterance(text); u.lang = 'de-DE'; if (voice) u.voice = voice; u.rate = 1.0; u.volume = 1;
+const snd = t => { const e = $('snd'); if (e) e.textContent = t; };
+function tts(text) {
+  try { if (speechSynthesis.speaking) speechSynthesis.cancel(); speechSynthesis.resume(); } catch { }
+  const u = new SpeechSynthesisUtterance(text); u.lang = 'de-DE'; if (voice) u.voice = voice; u.volume = 1;
+  u.onstart = () => snd('Ton ok (Synth) · ' + (++nSaid)); u.onerror = e => snd('Ton-Fehler: ' + e.error);
   speechSynthesis.speak(u);
+}
+function speak(text) {
+  busyUntil = performance.now() + 900 + text.length * 70;
+  const n = sIdx[text];
+  if (!n) return tts(text);
+  sfx.src = './sounds/' + n + '.mp3';
+  sfx.play().then(() => snd('Ton ok · ' + (++nSaid) + ' Ansagen')).catch(e => { snd('Ton-Fehler: ' + e.name); tts(text); });
+}
+function unlock() { // muss direkt im Fingertipp laufen
+  if (unlocked) return; unlocked = true; speak('Coach startet.');
+  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch { }
+}
+function say(text) {
+  if (muted || performance.now() < busyUntil) return false;
+  speak(text); return true;
 }
 
 // ---------- Ablauf ----------
@@ -59,11 +79,10 @@ function resetStats() { stats = { frames: 0, horse: 0, ang: [], gait: {}, msgs: 
 
 async function startSession(src) {
   await ready; if (!seg) return;
-  say(' '); // iOS: Ton durch Fingertipp freischalten
   if (src === 'cam') {
     const st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
-    vid.srcObject = st;
-  } else { vid.srcObject = null; vid.src = URL.createObjectURL(src); vid.loop = false; }
+    vid.muted = true; vid.srcObject = st;
+  } else { vid.srcObject = null; vid.muted = true; vid.src = URL.createObjectURL(src); vid.loop = false; }
   await vid.play();
   try { wake = await navigator.wakeLock?.request('screen'); } catch { }
   $('start').style.display = 'none'; $('panel').hidden = false; $('bar').hidden = false; $('report').style.display = 'none';
@@ -78,7 +97,7 @@ async function loop() {
     const t = vid.srcObject ? (performance.now() - t0) / 1000 : vid.currentTime;
     const r = await coach.step(t, vid.videoWidth, vid.videoHeight, getPatch, run);
     last = r; record(r); draw(r); panel(r);
-    if (r.msg) { banner = { msg: r.msg, t }; say(r.msg[0]); log.push({ t: Math.round(t), text: r.msg[0], kind: r.msg[1] }); }
+    if (r.msg) { banner = { msg: r.msg, t }; say(r.msg[0]); $('cnt').textContent = 'Ansagen: ' + (log.length + 1); log.push({ t: Math.round(t), text: r.msg[0], kind: r.msg[1] }); }
     n++; const now = performance.now(); if (now - tf > 2000) { $('fps').textContent = (n * 1000 / (now - tf)).toFixed(1) + ' Bilder/s'; n = 0; tf = now; }
     await new Promise(r => setTimeout(r, 0));
   }
@@ -98,7 +117,7 @@ function draw(r) {
   ctx.clearRect(0, 0, cw, ch); const lw = Math.max(3, cw / 300);
   if (r.seg) {
     const [a, b] = r.seg, v = [b[0] - a[0], b[1] - a[1]], top = P(a[0] - 0.5 * v[0], a[1] - 0.5 * v[1]), ext = P(b[0] + 0.4 * v[0], b[1] + 0.4 * v[1]);
-    ctx.lineWidth = lw * 2; ctx.strokeStyle = r.ang > -5 ? '#2fbf6a' : r.ang > -12 ? '#f2b33d' : '#e2453b';
+    ctx.lineWidth = lw * 2; ctx.strokeStyle = r.ang > -9 ? '#2fbf6a' : r.ang > -16 ? '#f2b33d' : '#e2453b';
     ctx.beginPath(); ctx.moveTo(...top); ctx.lineTo(...ext); ctx.stroke();
     ctx.lineWidth = lw; ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(...top); ctx.lineTo(top[0], ext[1]); ctx.stroke();
   }
@@ -111,7 +130,7 @@ function draw(r) {
   if (banner && r.t - banner.t < 3.5) { bn.style.display = 'block'; bn.textContent = banner.msg[0]; bn.style.background = { c: '#b8322ae6', p: '#25874be6', info: '#24599be6' }[banner.msg[1]]; }
   else bn.style.display = 'none';
 }
-const FMT = { ang: [v => (v > 0 ? '+' : '') + v.toFixed(0) + '°', v => v < -12], gaze: [v => v.toFixed(0) + '°', v => v > 27], lean: [v => (v > 0 ? '+' : '') + v.toFixed(0) + '°', v => Math.abs(v) > 8], hand: [v => v.toFixed(2), v => v > 0.16], elbow: [v => v.toFixed(0) + '°', v => v > 146], heel: [v => v.toFixed(2), v => v > 0.36] };
+const FMT = { ang: [v => (v > 0 ? '+' : '') + v.toFixed(0) + '°', v => v < -16], gaze: [v => v.toFixed(0) + '°', v => v > 27], lean: [v => (v > 0 ? '+' : '') + v.toFixed(0) + '°', v => v > 6 || v < -8], hand: [v => v.toFixed(2), v => v > 0.16], elbow: [v => v.toFixed(0) + '°', v => v > 146], heel: [v => v.toFixed(2), v => v > 0.36] };
 function panel(r) {
   $('gait').textContent = 'Gangart: ' + (r.gait || '–');
   for (const k in FMT) { const el = $('m-' + k), v = r.m?.[k]; if (v === null || v === undefined) { el.textContent = '–'; el.className = 'v'; } else { el.textContent = FMT[k][0](v); el.className = 'v ' + (FMT[k][1](v) ? 'bad' : 'ok'); } }
@@ -119,7 +138,7 @@ function panel(r) {
 
 // ---------- Bericht ----------
 function stopSession() {
-  running = false; speechSynthesis.cancel(); try { wake?.release(); } catch { }
+  running = false; speechSynthesis.cancel(); sfx.pause(); unlocked = false; try { wake?.release(); } catch { }
   vid.pause(); vid.srcObject?.getTracks().forEach(t => t.stop());
   const a = stats.ang, mins = ((Date.now() - stats.start) / 60000).toFixed(1);
   const behind = a.length ? Math.round(100 * a.filter(v => v < -5).length / a.length) : null;
@@ -135,12 +154,13 @@ function stopSession() {
 }
 
 // ---------- Bedienung ----------
-$('go-cam').onclick = () => startSession('cam').catch(e => status('Kamera nicht verfügbar: ' + e.message));
+$('go-cam').onclick = () => { unlock(); startSession('cam').catch(e => status('Kamera nicht verfügbar: ' + e.message)); };
+$('file').onclick = () => unlock();
 $('file').onchange = e => { const f = e.target.files[0]; if (f) startSession(f).catch(e => status('Video-Fehler: ' + e.message)); };
 $('stop').onclick = stopSession;
 $('mute').onclick = () => { muted = !muted; $('mute').textContent = muted ? 'Ton aus' : 'Ton an'; if (muted) speechSynthesis.cancel(); };
 $('freq').onchange = () => Object.assign(coach.opt, FREQ[$('freq').value]);
-$('test').onclick = () => { const m = muted; muted = false; say('Hand vor, Nase raus.'); muted = m; };
+$('test').onclick = () => { unlock(); speak('Hand vor, Nase raus.'); };
 $('copy').onclick = () => navigator.clipboard?.writeText($('rep').innerText).catch(() => { });
 $('again').onclick = () => { $('report').style.display = 'none'; $('start').style.display = 'grid'; status('Bereit.'); };
 window.__state = () => ({ log, frames: stats?.frames, horse: stats?.horse, fps: $('fps').textContent, gait: last?.gait, ang: last?.m?.ang });
