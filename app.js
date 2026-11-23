@@ -9,7 +9,7 @@ const status = t => $('status').textContent = t;
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
 let seg, pose;
-const VERSION = 'v1.3';
+const VERSION = 'v1.5';
 const ready = (async () => {
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
   // Modelle liegen in Teilen (Upload-Grenze) und werden hier zusammengesetzt
@@ -41,8 +41,18 @@ function getPatch(box) {
 // ---------- Sprache ----------
 // Ansagen als fertige Tondateien (laufen auf iOS über Kopfhörer wie Musik), Sprachsynthese nur als Notlösung
 let voice = null, muted = false, busyUntil = 0, nSaid = 0, unlocked = false, sIdx = { 'Coach startet.': 's00' };
-fetch('./sounds/index.json').then(r => r.json()).then(j => sIdx = j).catch(() => { });
-const sfx = new Audio(); sfx.preload = 'auto'; sfx.setAttribute('playsinline', '');
+// Web Audio: einmal per Fingertipp gestartet, danach dürfen Ansagen jederzeit kommen (iOS)
+try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { } // auch bei Stumm-Schalter
+let actx = null; const bufs = {};
+async function loadSounds() {
+  try { const j = await (await fetch('./sounds/index.json')).json(); sIdx = j;
+    await Promise.all(Object.values(j).map(async n => { const ab = await (await fetch('./sounds/' + n + '.mp3')).arrayBuffer(); bufs[n] = await actx.decodeAudioData(ab); }));
+    snd('Ton bereit (' + Object.keys(bufs).length + ' Ansagen geladen)');
+  } catch (e) { snd('Ton-Fehler beim Laden: ' + e.message); }
+}
+function keepAlive() { // stiller Dauerton hält Audio und Bluetooth wach
+  const b = actx.createBuffer(1, actx.sampleRate, actx.sampleRate), s = actx.createBufferSource(); s.buffer = b; s.loop = true; s.connect(actx.destination); s.start();
+}
 function pickVoice() {
   const v = speechSynthesis.getVoices().filter(x => x.lang && x.lang.toLowerCase().startsWith('de'));
   const score = x => (/premium|erweitert|enhanced/i.test(x.name) ? 4 : 0) + (/anna|helena|petra|markus|yannick/i.test(x.name) ? 2 : 0) + (x.localService ? 1 : 0);
@@ -58,14 +68,16 @@ function tts(text) {
 }
 function speak(text) {
   busyUntil = performance.now() + 900 + text.length * 70;
-  const n = sIdx[text];
-  if (!n) return tts(text);
-  sfx.src = './sounds/' + n + '.mp3';
-  sfx.play().then(() => snd('Ton ok · ' + (++nSaid) + ' Ansagen')).catch(e => { snd('Ton-Fehler: ' + e.name); tts(text); });
+  const n = sIdx[text], b = n && bufs[n];
+  if (!actx || !b) return tts(text);
+  if (actx.state !== 'running') actx.resume();
+  const s = actx.createBufferSource(); s.buffer = b; s.connect(actx.destination); s.start();
+  snd('Ton ok · ' + (++nSaid) + ' Ansagen · ' + actx.state);
 }
 function unlock() { // muss direkt im Fingertipp laufen
-  if (unlocked) return; unlocked = true; speak('Coach startet.');
-  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch { }
+  if (!actx) { actx = new (window.AudioContext || window.webkitAudioContext)(); keepAlive(); loadSounds().then(() => speak('Coach startet.')); }
+  actx.resume();
+  if (!unlocked) { unlocked = true; try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch { } }
 }
 function say(text) {
   if (muted || performance.now() < busyUntil) return false;
@@ -73,7 +85,7 @@ function say(text) {
 }
 
 // ---------- Ablauf ----------
-const FREQ = { ruhig: { gapAny: 10, gapCat: 30, gapPraise: 20 }, normal: { gapAny: 6, gapCat: 20, gapPraise: 14 }, viel: { gapAny: 4, gapCat: 14, gapPraise: 10 } };
+const FREQ = { ruhig: { gapAny: 10, gapCat: 30, gapPraise: 20 }, normal: { gapAny: 8, gapCat: 20, gapPraise: 16 }, viel: { gapAny: 4, gapCat: 14, gapPraise: 10 } };
 let coach = new Coach(FREQ.normal), running = false, t0 = 0, last = null, banner = null, log = [], stats, wake = null;
 function resetStats() { stats = { frames: 0, horse: 0, ang: [], gait: {}, msgs: [], start: Date.now() }; }
 
@@ -138,7 +150,7 @@ function panel(r) {
 
 // ---------- Bericht ----------
 function stopSession() {
-  running = false; speechSynthesis.cancel(); sfx.pause(); unlocked = false; try { wake?.release(); } catch { }
+  running = false; speechSynthesis.cancel(); unlocked = false; try { wake?.release(); } catch { }
   vid.pause(); vid.srcObject?.getTracks().forEach(t => t.stop());
   const a = stats.ang, mins = ((Date.now() - stats.start) / 60000).toFixed(1);
   const behind = a.length ? Math.round(100 * a.filter(v => v < -5).length / a.length) : null;
@@ -155,12 +167,13 @@ function stopSession() {
 
 // ---------- Bedienung ----------
 $('go-cam').onclick = () => { unlock(); startSession('cam').catch(e => status('Kamera nicht verfügbar: ' + e.message)); };
-$('file').onclick = () => unlock();
+$('file').onclick = () => unlock(); document.querySelector('label[for=file]').addEventListener('click', unlock);
 $('file').onchange = e => { const f = e.target.files[0]; if (f) startSession(f).catch(e => status('Video-Fehler: ' + e.message)); };
 $('stop').onclick = stopSession;
 $('mute').onclick = () => { muted = !muted; $('mute').textContent = muted ? 'Ton aus' : 'Ton an'; if (muted) speechSynthesis.cancel(); };
 $('freq').onchange = () => Object.assign(coach.opt, FREQ[$('freq').value]);
 $('test').onclick = () => { unlock(); speak('Hand vor, Nase raus.'); };
+document.addEventListener('visibilitychange', () => { if (!document.hidden && actx) actx.resume(); });
 $('copy').onclick = () => navigator.clipboard?.writeText($('rep').innerText).catch(() => { });
 $('again').onclick = () => { $('report').style.display = 'none'; $('start').style.display = 'grid'; status('Bereit.'); };
 window.__state = () => ({ log, frames: stats?.frames, horse: stats?.horse, fps: $('fps').textContent, gait: last?.gait, ang: last?.m?.ang });
