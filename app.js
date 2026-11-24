@@ -1,4 +1,4 @@
-import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.webgpu.min.mjs';
+import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.wasm.min.mjs';
 import { Coach, S, RULES } from './core.js';
 
 const $ = id => document.getElementById(id);
@@ -9,7 +9,7 @@ const status = t => $('status').textContent = t;
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
 let seg, pose;
-const VERSION = 'v1.7';
+const VERSION = 'v1.8';
 let backend = 'CPU';
 const ready = (async () => {
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
@@ -20,7 +20,7 @@ const ready = (async () => {
   status('Lade Modell 2/2 …'); const bPose = await load('yolo11n-pose.onnx');
   seg = await ort.InferenceSession.create(bSeg.slice(), opt); pose = await ort.InferenceSession.create(bPose.slice(), opt);
   // Grafikchip (WebGPU) versuchen; nur nutzen, wenn Ergebnisse gleich und schneller sind
-  if (navigator.gpu && !/[?&]cpu\b/.test(location.search)) {
+  if (false) {
     const tmo = (p, ms) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('Zeitüberschreitung')), ms))]);
     try {
       status('Prüfe Grafikchip …');
@@ -38,14 +38,16 @@ const ready = (async () => {
   }
   status('Bereit. (' + VERSION + ' · ' + backend + ')');
 })().catch(e => status('Fehler beim Laden: ' + e.message));
+let inT = null;
 async function run(name, data) {
   const s = name === 'seg' ? seg : pose;
-  const o = await s.run({ images: new ort.Tensor('float32', data, [1, 3, S, S]) });
+  if (!inT || inT.data !== data) inT = new ort.Tensor('float32', data, [1, 3, S, S]);
+  const o = await s.run({ images: inT });
   return { out0: o.output0.data, out1: o.output1?.data };
 }
 
 // ---------- Ausschnitt fürs Modell ----------
-const pc = new OffscreenCanvas(S, S), px = pc.getContext('2d', { willReadFrequently: true });
+const pc = Object.assign(document.createElement('canvas'), { width: S, height: S }), px = pc.getContext('2d', { willReadFrequently: true });
 const buf = new Float32Array(3 * S * S);
 function getPatch(box) {
   const W = vid.videoWidth, H = vid.videoHeight, b = box || [0, 0, W, H];
