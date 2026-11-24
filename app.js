@@ -1,5 +1,5 @@
-import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.wasm.min.mjs';
-import { Coach, S } from './core.js';
+import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.webgpu.min.mjs';
+import { Coach, S, RULES } from './core.js';
 
 const $ = id => document.getElementById(id);
 const vid = $('vid'), ov = $('ov'), ctx = ov.getContext('2d');
@@ -9,15 +9,34 @@ const status = t => $('status').textContent = t;
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
 let seg, pose;
-const VERSION = 'v1.5';
+const VERSION = 'v1.7';
+let backend = 'CPU';
 const ready = (async () => {
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
   // Modelle liegen in Teilen (Upload-Grenze) und werden hier zusammengesetzt
   const load = async name => { const parts = []; for (let i = 0; ; i++) { const r = await fetch(`./models/${name}.part${i}`); if (!r.ok) break; parts.push(new Uint8Array(await r.arrayBuffer())); }
     const n = parts.reduce((s, p) => s + p.length, 0), all = new Uint8Array(n); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; } return all; };
-  status('Lade Modell 1/2 …'); seg = await ort.InferenceSession.create(await load('yolo11n-seg.onnx'), opt);
-  status('Lade Modell 2/2 …'); pose = await ort.InferenceSession.create(await load('yolo11n-pose.onnx'), opt);
-  status('Bereit. (' + VERSION + ')');
+  status('Lade Modell 1/2 …'); const bSeg = await load('yolo11n-seg.onnx');
+  status('Lade Modell 2/2 …'); const bPose = await load('yolo11n-pose.onnx');
+  seg = await ort.InferenceSession.create(bSeg.slice(), opt); pose = await ort.InferenceSession.create(bPose.slice(), opt);
+  // Grafikchip (WebGPU) versuchen; nur nutzen, wenn Ergebnisse gleich und schneller sind
+  if (navigator.gpu && !/[?&]cpu\b/.test(location.search)) {
+    const tmo = (p, ms) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('Zeitüberschreitung')), ms))]);
+    try {
+      status('Prüfe Grafikchip …');
+      const g = { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' };
+      const sg = await tmo(ort.InferenceSession.create(bSeg.slice(), g), 20000), pg = await tmo(ort.InferenceSession.create(bPose.slice(), g), 20000);
+      const x = new Float32Array(3 * S * S); for (let i = 0; i < x.length; i++) x[i] = ((i * 7919) % 997) / 997;
+      const T = d => new ort.Tensor('float32', d, [1, 3, S, S]);
+      const same = async (a, b) => { const p = (await a.run({ images: T(x) })).output0.data, q = (await b.run({ images: T(x) })).output0.data; let m = 0, d = 0; for (let i = 0; i < p.length; i++) { m = Math.max(m, Math.abs(p[i])); d = Math.max(d, Math.abs(p[i] - q[i])); } return d <= 0.02 * m; };
+      const speed = async s => { await s.run({ images: T(x) }); const t = performance.now(); for (let i = 0; i < 3; i++) await s.run({ images: T(x) }); return (performance.now() - t) / 3; };
+      if (await same(seg, sg) && await same(pose, pg)) {
+        const tc = await speed(seg) + await speed(pose), tg = await speed(sg) + await speed(pg);
+        if (tg < tc * 0.9) { seg = sg; pose = pg; backend = 'GPU'; } else backend = 'CPU (GPU nicht schneller)';
+      } else backend = 'CPU (GPU ungenau)';
+    } catch (e) { backend = 'CPU (kein GPU: ' + String(e.message || e).slice(0, 40) + ')'; }
+  }
+  status('Bereit. (' + VERSION + ' · ' + backend + ')');
 })().catch(e => status('Fehler beim Laden: ' + e.message));
 async function run(name, data) {
   const s = name === 'seg' ? seg : pose;
@@ -87,7 +106,7 @@ function say(text) {
 // ---------- Ablauf ----------
 const FREQ = { ruhig: { gapAny: 10, gapCat: 30, gapPraise: 20 }, normal: { gapAny: 8, gapCat: 20, gapPraise: 16 }, viel: { gapAny: 4, gapCat: 14, gapPraise: 10 } };
 let coach = new Coach(FREQ.normal), running = false, t0 = 0, last = null, banner = null, log = [], stats, wake = null;
-function resetStats() { stats = { frames: 0, horse: 0, ang: [], gait: {}, msgs: [], start: Date.now() }; }
+function resetStats() { stats = { frames: 0, horse: 0, ang: [], gait: {}, msgs: [], start: Date.now(), fault: {}, seen: {}, work: 0, maxWork: 0, lastT: null, walks: 0, prevG: null }; }
 
 async function startSession(src) {
   await ready; if (!seg) return;
@@ -118,7 +137,15 @@ function record(r) {
   stats.frames++; if (r.hb) stats.horse++;
   if (r.ang !== undefined) stats.ang.push(r.ang);
   if (r.gait) stats.gait[r.gait] = (stats.gait[r.gait] || 0) + 1;
+  for (const [k, , , cat] of RULES) { const v = r.m?.[k]; if (v === null || v === undefined) continue; stats.seen[cat] = (stats.seen[cat] || 0) + 1; }
+  for (const [k, test, , cat] of RULES) { const v = r.m?.[k]; if (v !== null && v !== undefined && test(v)) stats.fault[cat] = (stats.fault[cat] || 0) + 1; }
+  // Arbeitsphasen ohne Schrittpause
+  const dt = stats.lastT === null ? 0 : Math.min(2, r.t - stats.lastT); stats.lastT = r.t;
+  if (r.gait === 'Trab' || r.gait === 'Galopp') { stats.work += dt; stats.maxWork = Math.max(stats.maxWork, stats.work); }
+  else if (r.gait === 'Schritt' || r.gait === 'Halt') { if (stats.work > 30) stats.walks++; stats.work = 0; }
 }
+const GOOD = { kopf: 'Kopfhaltung', blick: 'Blick nach vorn', oberkoerper: 'Oberkörper aufrecht', hand: 'Handhöhe', handruhe: 'ruhige Hände', ellbogen: 'Ellbogen weich', bein: 'Beinlage' };
+const CAT = { kopf: ['Kopf/Hals (Nase hinter der Senkrechten)', 'Zügel länger lassen, Hand vor, Hals dehnen lassen.'], blick: ['Blick nach unten', 'Bewusst vorausschauen: nächster Buchstabe, nächste Linie.'], oberkoerper: ['Oberkörper', 'Groß machen, Schulterblätter zurück, ruhig sitzen.'], hand: ['Hände zu hoch', 'Hände tief und ruhig über dem Widerrist, Linie Ellbogen–Hand–Maul.'], handruhe: ['Hände unruhig', 'Hand stehen lassen, aus dem Sitz mitgehen, Bein macht die Arbeit.'], ellbogen: ['Arme gestreckt', 'Ellbogen locker an der Hüfte, Arm weich.'], bein: ['Bein/Absatz', 'Bein lang, Absatz unter die Hüfte.'] };
 
 // ---------- Anzeige ----------
 function fit() { const R = ov.getBoundingClientRect(), d = devicePixelRatio || 1; ov.width = R.width * d; ov.height = R.height * d; }
@@ -159,8 +186,25 @@ function stopSession() {
   const cnt = {}; log.filter(l => l.kind === 'c').forEach(l => cnt[l.text] = (cnt[l.text] || 0) + 1);
   const rows = [['Dauer', mins + ' min'], ['Pferd erkannt', Math.round(100 * stats.horse / Math.max(1, stats.frames)) + ' %'], ['Nase zur Senkrechten (Mittel)', med + '°'], ['Anteil hinter der Senkrechten', behind === null ? '–' : behind + ' %'],
   ...Object.entries(stats.gait).map(([g, v]) => ['Anteil ' + g, Math.round(100 * v / gsum) + ' %']), ['Ansagen gesamt', log.length], ['davon Korrekturen', log.filter(l => l.kind === 'c').length], ['davon Lob', log.filter(l => l.kind === 'p').length]];
+  // Fehleranteile je Bereich, Punktzahl, Schwerpunkte
+  const share = {}; for (const c in CAT) if ((stats.seen[c] || 0) > 10) share[c] = Math.round(100 * (stats.fault[c] || 0) / stats.seen[c]);
+  const vals = Object.values(share), score = vals.length ? Math.max(0, Math.round(100 - vals.reduce((s, v) => s + v, 0) / vals.length)) : null;
+  const worst = Object.entries(share).filter(([, v]) => v >= 15).sort((x, y) => y[1] - x[1]).slice(0, 3), good = Object.entries(share).filter(([, v]) => v < 10).map(([c]) => GOOD[c]);
+  const src = vid.srcObject ? 'Live' : 'Video';
+  const sum = { d: new Date().toISOString().slice(0, 16).replace('T', ' '), src, mins: +mins, score, med: med === '–' ? null : +med, behind, share };
+  let hist = []; try { hist = JSON.parse(localStorage.getItem('rc_hist') || '[]'); } catch { }
+  const prev = hist.filter(h => h.src === src).slice(-1)[0];
+  if (+mins >= 0.5) { hist.push(sum); hist = hist.slice(-30); try { localStorage.setItem('rc_hist', JSON.stringify(hist)); } catch { } }
+  const trend = (n, o, better) => o === null || o === undefined || n === null ? '' : n === o ? ' (=)' : ((better === 'up' ? n > o : n < o) ? ' (↑ besser als letztes Mal: ' + o + ')' : ' (↓ letztes Mal: ' + o + ')');
+  rows.unshift(['Gesamtpunkte', score === null ? '–' : score + ' / 100' + trend(score, prev?.score, 'up')]);
+  rows.push(['Schrittpausen nach Arbeit', stats.walks], ['Längste Arbeitsphase ohne Pause', Math.round(stats.maxWork / 60 * 10) / 10 + ' min'], ['Technik', VERSION + ' · ' + backend + ' · ' + $('fps').textContent]);
+  const behindRow = rows.find(r => r[0] === 'Anteil hinter der Senkrechten'); if (behindRow && behind !== null) behindRow[1] += trend(behind, prev?.behind, 'down');
   $('rep').innerHTML = '<table>' + rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('') + '</table>' +
+    '<h3>Schwerpunkte fürs nächste Mal</h3>' + (worst.length ? '<table>' + worst.map(([c, v]) => `<tr><td><b>${CAT[c][0]}</b> (${v} % der Zeit)<br>${CAT[c][1]}</td></tr>`).join('') + '</table>' : '<p>Keine deutlichen Schwächen erkannt.</p>') +
+    (good.length ? '<h3>Das lief gut</h3><p>' + good.join(', ') + '</p>' : '') +
+    '<h3>Anteil der Zeit mit Fehler je Bereich</h3><table>' + Object.entries(share).map(([c, v]) => `<tr><td>${CAT[c][0]}</td><td>${v} %${trend(v, prev?.share?.[c], 'down')}</td></tr>`).join('') + '</table>' +
     '<h3>Häufigste Korrekturen</h3><table>' + Object.entries(cnt).sort((x, y) => y[1] - x[1]).map(([k, v]) => `<tr><td>${k}</td><td>${v}×</td></tr>`).join('') + '</table>' +
+    '<h3>Verlauf (letzte Einheiten)</h3><table><tr><td>Datum</td><td>Punkte · hinter Senkr. · Min</td></tr>' + hist.slice(-8).reverse().map(h => `<tr><td>${h.d} ${h.src === 'Video' ? '(Video)' : ''}</td><td>${h.score ?? '–'} · ${h.behind ?? '–'} % · ${h.mins}</td></tr>`).join('') + '</table>' +
     '<h3>Alle Ansagen</h3><table>' + log.map(l => `<tr><td>${l.text}</td><td>${l.t} s</td></tr>`).join('') + '</table>';
   $('report').style.display = 'block'; $('panel').hidden = true; $('bar').hidden = true;
 }
