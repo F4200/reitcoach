@@ -86,7 +86,7 @@ export function headGeom(mask, fl) {
   const ang = -deg(Math.atan(k));
   let pa = [xf[ya], ya], pb = [xf[yb - 1], yb - 1];
   if (!fl) { pa = [S - 1 - pa[0], pa[1]]; pb = [S - 1 - pb[0], pb[1]]; }
-  return { ang, pa, pb };
+  return { ang, pa, pb, hy: (y1 - ear) / H, ny: (y1 - nose) / H };
 }
 
 // ---------- Sitz der Reiterin ----------
@@ -139,11 +139,12 @@ export function classifyGait(w) {
 // ---------- Ansagen ----------
 export const RULES = [
   ['ang', v => v < -16, ['Hand vor, Nase raus.', 'Gib nach, lass sie vorne raus.', 'Zügel etwas länger, Hals lang machen.', 'Hals lang, lass sie sich dehnen.'], 'kopf'],
-  ['gaze', v => v > 27, ['Blick hoch!', 'Schau nach vorne, zwischen den Ohren durch.', 'Schau voraus, plan deine Linie.', 'Vorausschauen, nicht aufs Pferd gucken.'], 'blick'],
+  ['gaze', v => v > 20, ['Blick hoch!', 'Schau nach vorne, zwischen den Ohren durch.', 'Schau voraus, plan deine Linie.', 'Vorausschauen, nicht aufs Pferd gucken.'], 'blick'],
   ['lean', v => v > 6, ['Oberkörper aufrichten.', 'Mach dich groß, Schulterblätter zurück.', 'Ruhig sitzen bleiben, nicht vorbeugen.'], 'oberkoerper'],
   ['lean', v => v < -8, ['Nicht nach hinten lehnen, senkrecht sitzen.'], 'oberkoerper'],
   ['hand', v => v > 0.16, ['Hände tiefer.', 'Hände ruhig über dem Widerrist tragen.', 'Hand, Ellbogen, Maul: eine Linie.'], 'hand'],
-  ['wsd', v => v > 0.075, ['Hände ruhig halten.', 'Hände stehen lassen, nicht mitwackeln.', 'Hand ruhig, das Bein macht die Arbeit.'], 'handruhe'],
+  ['wjit', v => v > 0.045, ['Hände ruhig halten.', 'Hände stehen lassen, nicht mitwackeln.', 'Hand ruhig, das Bein macht die Arbeit.'], 'handruhe'],
+  ['flick', v => v > 0.5, ['Zügel gleichmäßig dran lassen, nicht zupfen.'], 'zuegel'],
   ['elbow', v => v > 146, ['Ellbogen anwinkeln, locker an den Körper.', 'Arme nicht strecken, Ellbogen weich.', 'Ellbogen an die Hüfte, ganz locker.'], 'ellbogen'],
   ['heel', v => v > 0.36, ['Absatz unter die Hüfte, Bein zurück.', 'Bein lang, Absatz tief.', 'Bein ruhig dran lassen.'], 'bein'],
 ];
@@ -163,8 +164,8 @@ const TEMPO = {
 const pick = a => a[Math.floor(Math.random() * a.length)];
 
 export class Coach {
-  constructor(opt = {}) { this.opt = Object.assign({ gapAny: 6, gapCat: 20, gapPraise: 14 }, opt); this.reset(); }
-  reset() { this.hist = []; this.sig = []; this.last = {}; this.lastAny = -99; this.lastPraise = -99; this.gaitHist = []; this.prevGait = null; this.baseF = []; this.track = null; this.miss = 0; this.gait = null; this.gw = null; this.lastGaitCalc = -99; this.baseG = {}; this.walkSince = undefined; this.walkSaid = false; this.lastWalk = undefined; this._lastG = null; }
+  constructor(opt = {}) { this.opt = Object.assign({ gapAny: 8, gapCat: 20, gapPraise: 16, maxPerMin: 5, gapCatSlow: 40 }, opt); this.reset(); }
+  reset() { this.hist = []; this.sig = []; this.last = {}; this.lastAny = -99; this.lastPraise = -99; this.gaitHist = []; this.prevGait = null; this.baseF = []; this.track = null; this.miss = 0; this.gait = null; this.gw = null; this.lastGaitCalc = -99; this.baseG = {}; this.walkSince = undefined; this.walkSaid = false; this.lastWalk = undefined; this._lastG = null; this._kopfBad = false; this._fc = {}; this.said = []; }
 
   // getPatch(box) -> {data:Float32Array(3*S*S), sc, ox, oy} ; box in Bildkoordinaten oder null = ganzes Bild
   // run(name, data) -> Promise<{out0,out1}>
@@ -199,7 +200,7 @@ export class Coach {
       if (fl !== null) {
         Object.assign(r, riderMetrics(rd, fl));
         const g = headGeom(h.mask, fl);
-        if (g) { r.ang = g.ang; r.seg = [toF(...g.pa), toF(...g.pb)]; }
+        if (g) { r.ang = g.ang; r.hy = g.hy; r.ny = g.ny; r.seg = [toF(...g.pa), toF(...g.pb)]; }
       }
       // Rhythmus-Signale
       const c = rd.kc, k = rd.kp, H = hb[3] - hb[1], W = hb[2] - hb[0];
@@ -217,13 +218,18 @@ export class Coach {
     this.hist = this.hist.filter(x => x.t > t - 3); this.sig = this.sig.filter(x => x.t > t - 4.5);
     const win = this.hist.filter(x => x.t > t - 3);
     const med = k => { const v = win.filter(x => x[k] !== undefined).map(x => x[k]); return v.length >= 3 ? median(v) : null; };
-    const m = {}; for (const k of ['ang', 'gaze', 'lean', 'hand', 'heel', 'elbow']) m[k] = med(k);
-    const hv = win.filter(x => x.hand !== undefined).map(x => x.hand); m.wsd = hv.length >= 5 ? std(hv) : null;
+    const m = {}; for (const k of ['ang', 'gaze', 'lean', 'hand', 'heel', 'elbow', 'hy', 'ny']) m[k] = med(k);
+    const hw = win.filter(x => x.hand !== undefined), hv = hw.map(x => x.hand); m.wsd = hv.length >= 5 ? std(hv) : null;
+    // schnelles Zupfen: Hand minus gleitender Mittelwert (ca. 1 s) -> langsames Führen zählt nicht
+    m.wjit = null;
+    if (hw.length >= 6) { const d = hw.map((x, i) => { const nb = hw.filter(y => Math.abs(y.t - x.t) <= 0.6).map(y => y.hand); return x.hand - nb.reduce((s, v) => s + v, 0) / nb.length; }); m.wjit = std(d); }
+    const av = win.filter(x => x.ang !== undefined).map(x => x.ang); m.angsd = av.length >= 6 ? std(av) : null;
+    m.flick = m.wjit !== null && m.angsd !== null && m.wjit > 0.045 && m.angsd > 4 ? 1 : 0;
     r.m = m;
     // Gangart (jede Sekunde neu)
     if (t - this.lastGaitCalc >= 1) {
       this.lastGaitCalc = t; const s = this.sig;
-      if (s.length >= 14 && s[s.length - 1].t - s[0].t > 3.2 && s.length / (s[s.length - 1].t - s[0].t) >= 4) {
+      if (s.length >= 10 && s[s.length - 1].t - s[0].t > 3.2 && s.length / (s[s.length - 1].t - s[0].t) >= 2.5) {
         const tt = s.map(x => x.t), w = {};
         const a = spectrum(tt, s.map(x => x.asp)), b = spectrum(tt, s.map(x => x.hip));
         const hs = s.filter(x => x.head !== null), c = hs.length > 12 ? spectrum(hs.map(x => x.t), hs.map(x => x.head)) : null;
@@ -249,11 +255,25 @@ export class Coach {
     if (this.lastWalk === undefined) this.lastWalk = t;
     if (!msg && this.gait === 'Schritt' && this.walkSince !== undefined && !this.walkSaid && t - this.walkSince > 25 && t - this.lastAny > o.gapAny) { msg = ['Pause gut nutzen, Zügel ganz hingeben.', 'info']; this.walkSaid = true; }
     if (!msg && (this.gait === 'Trab' || this.gait === 'Galopp') && t - this.lastWalk > 300 && t - (this.last.pause ?? -99) > 120 && t - this.lastAny > o.gapAny) { msg = ['Denk an eine Schrittpause für sie.', 'info']; this.last.pause = t; }
-    const faults = RULES.filter(([k, test]) => m[k] !== null && m[k] !== undefined && test(m[k]));
-    if (!msg && t - this.lastAny > o.gapAny && t - this.lastPraise > o.gapPraise && m.ang !== null && m.ang > -9 && faults.length <= 1) { msg = [pick(PRAISE), 'p']; this.lastPraise = t; }
-    if (!msg && t - this.lastAny > o.gapAny) for (const [k, test, ph, cat] of faults) if (t - (this.last[cat] ?? -99) > o.gapCat) { msg = [pick(ph), 'c']; this.last[cat] = t; break; }
+    let faults = RULES.filter(([k, test]) => m[k] !== null && m[k] !== undefined && test(m[k]));
+    // Kopf: Hysterese (Korrektur unter -16 Grad, Entwarnung erst über -13 Grad)
+    if (m.ang !== null && m.ang !== undefined) { if (m.ang < -16) this._kopfBad = true; else if (m.ang > -13) this._kopfBad = false; }
+    faults = faults.filter(([k]) => k !== 'ang' || this._kopfBad);
+    if (this._kopfBad && m.ang !== null && m.ang >= -16 && m.ang <= -13) { const r0 = RULES[0]; if (!faults.includes(r0)) faults.unshift(r0); }
+    // Sitz-Themen nur, wenn sie anhalten (mind. 3 Prüfungen = ca. 3 s) -> kein Dauerfeuer
+    this._fc = this._fc || {}; const seenCat = new Set(faults.map(f => f[3]));
+    for (const cat of ['bein', 'oberkoerper']) this._fc[cat] = seenCat.has(cat) ? (this._fc[cat] || 0) + 1 : 0;
+    faults = faults.filter(f => !['bein', 'oberkoerper'].includes(f[3]) || this._fc[f[3]] >= 12);
+    this.said = (this.said || []).filter(x => x > t - 60);
+    const capped = this.said.length >= (o.maxPerMin ?? 5);
+    if (!msg && t - this.lastAny > o.gapAny && t - this.lastPraise > o.gapPraise && m.ang !== null && m.ang > -9 && m.ang < 12 && faults.length <= 1 && !faults.some(f => ['kopf', 'zuegel', 'handruhe'].includes(f[3]))) { msg = [pick(PRAISE), 'p']; this.lastPraise = t; }
+    if (!msg && !capped && t - this.lastAny > o.gapAny) {
+      const slow = c2 => ['bein', 'oberkoerper'].includes(c2) ? (o.gapCatSlow ?? o.gapCat * 2) : (c2 === 'blick' ? Math.min(o.gapCat, 12) : o.gapCat);
+      const due = faults.filter(f => t - (this.last[f[3]] ?? -99) > slow(f[3])).sort((a, b) => (this.last[a[3]] ?? -99) - (this.last[b[3]] ?? -99));
+      if (due.length) { const [, , ph, cat] = due[0]; msg = [pick(ph), 'c']; this.last[cat] = t; }
+    }
     if (warm) msg = null;
-    if (msg) this.lastAny = t;
+    if (msg) { this.lastAny = t; if (msg[1] === 'c' || msg[1] === 'p') this.said.push(t); }
     r.msg = msg;
     return r;
   }

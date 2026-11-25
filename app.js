@@ -9,7 +9,7 @@ const status = t => $('status').textContent = t;
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
 let seg, pose;
-const VERSION = 'v1.8';
+const VERSION = 'v1.9';
 let backend = 'CPU';
 const ready = (async () => {
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
@@ -106,9 +106,9 @@ function say(text) {
 }
 
 // ---------- Ablauf ----------
-const FREQ = { ruhig: { gapAny: 10, gapCat: 30, gapPraise: 20 }, normal: { gapAny: 8, gapCat: 20, gapPraise: 16 }, viel: { gapAny: 4, gapCat: 14, gapPraise: 10 } };
+const FREQ = { ruhig: { gapAny: 12, gapCat: 30, gapPraise: 24, maxPerMin: 3, gapCatSlow: 60 }, normal: { gapAny: 8, gapCat: 20, gapPraise: 16, maxPerMin: 5, gapCatSlow: 40 }, viel: { gapAny: 6, gapCat: 14, gapPraise: 10, maxPerMin: 8, gapCatSlow: 30 } };
 let coach = new Coach(FREQ.normal), running = false, t0 = 0, last = null, banner = null, log = [], stats, wake = null;
-function resetStats() { stats = { frames: 0, horse: 0, ang: [], gait: {}, msgs: [], start: Date.now(), fault: {}, seen: {}, work: 0, maxWork: 0, lastT: null, walks: 0, prevG: null }; }
+function resetStats() { learn = { samples: [], marks: [] }; lastSampleT = -9; stats = { frames: 0, horse: 0, ang: [], gait: {}, msgs: [], start: Date.now(), fault: {}, seen: {}, work: 0, maxWork: 0, lastT: null, walks: 0, prevG: null }; }
 
 async function startSession(src) {
   await ready; if (!seg) return;
@@ -118,7 +118,7 @@ async function startSession(src) {
   } else { vid.srcObject = null; vid.muted = true; vid.src = URL.createObjectURL(src); vid.loop = false; }
   await vid.play();
   try { wake = await navigator.wakeLock?.request('screen'); } catch { }
-  $('start').style.display = 'none'; $('panel').hidden = false; $('bar').hidden = false; $('report').style.display = 'none';
+  $('start').style.display = 'none'; $('panel').hidden = false; $('bar').hidden = false; $('report').style.display = 'none'; $('lmbar').hidden = !learnOn;
   coach = new Coach(FREQ[$('freq').value]); resetStats(); log = []; running = true; t0 = performance.now();
   vid.onended = () => stopSession();
   loop();
@@ -129,12 +129,17 @@ async function loop() {
     if (vid.readyState < 2) { await new Promise(r => requestAnimationFrame(r)); continue; }
     const t = vid.srcObject ? (performance.now() - t0) / 1000 : vid.currentTime;
     const r = await coach.step(t, vid.videoWidth, vid.videoHeight, getPatch, run);
-    last = r; record(r); draw(r); panel(r);
+    last = r; record(r); sample(r); draw(r); panel(r);
     if (r.msg) { banner = { msg: r.msg, t }; say(r.msg[0]); $('cnt').textContent = 'Ansagen: ' + (log.length + 1); log.push({ t: Math.round(t), text: r.msg[0], kind: r.msg[1] }); }
     n++; const now = performance.now(); if (now - tf > 2000) { $('fps').textContent = (n * 1000 / (now - tf)).toFixed(1) + ' Bilder/s'; n = 0; tf = now; }
     await new Promise(r => setTimeout(r, 0));
   }
 }
+// ---------- Lernmodus: Messwerte je Sekunde + Markierungen ----------
+let learnOn = false, learn = { samples: [], marks: [] }, lastSampleT = -9;
+const snap = r => { const m = r.m || {}, o = { t: +r.t.toFixed(1), gait: r.gait || null }; for (const k of ['ang', 'hy', 'ny', 'gaze', 'lean', 'hand', 'heel', 'elbow', 'wsd', 'wjit', 'angsd', 'flick']) o[k] = m[k] === null || m[k] === undefined ? null : +(+m[k]).toFixed(3); return o; };
+function sample(r) { if (!learnOn || !r.m || r.t - lastSampleT < 1) return; lastSampleT = r.t; learn.samples.push(snap(r)); }
+function mark(label) { if (!last || !last.m) return; learn.marks.push({ label, ...snap(last) }); const b = $('lm-info'); if (b) b.textContent = 'Markiert: ' + label + ' (' + learn.marks.length + ')'; }
 function record(r) {
   stats.frames++; if (r.hb) stats.horse++;
   if (r.ang !== undefined) stats.ang.push(r.ang);
@@ -146,8 +151,8 @@ function record(r) {
   if (r.gait === 'Trab' || r.gait === 'Galopp') { stats.work += dt; stats.maxWork = Math.max(stats.maxWork, stats.work); }
   else if (r.gait === 'Schritt' || r.gait === 'Halt') { if (stats.work > 30) stats.walks++; stats.work = 0; }
 }
-const GOOD = { kopf: 'Kopfhaltung', blick: 'Blick nach vorn', oberkoerper: 'Oberkörper aufrecht', hand: 'Handhöhe', handruhe: 'ruhige Hände', ellbogen: 'Ellbogen weich', bein: 'Beinlage' };
-const CAT = { kopf: ['Kopf/Hals (Nase hinter der Senkrechten)', 'Zügel länger lassen, Hand vor, Hals dehnen lassen.'], blick: ['Blick nach unten', 'Bewusst vorausschauen: nächster Buchstabe, nächste Linie.'], oberkoerper: ['Oberkörper', 'Groß machen, Schulterblätter zurück, ruhig sitzen.'], hand: ['Hände zu hoch', 'Hände tief und ruhig über dem Widerrist, Linie Ellbogen–Hand–Maul.'], handruhe: ['Hände unruhig', 'Hand stehen lassen, aus dem Sitz mitgehen, Bein macht die Arbeit.'], ellbogen: ['Arme gestreckt', 'Ellbogen locker an der Hüfte, Arm weich.'], bein: ['Bein/Absatz', 'Bein lang, Absatz unter die Hüfte.'] };
+const GOOD = { kopf: 'Kopfhaltung', blick: 'Blick nach vorn', oberkoerper: 'Oberkörper aufrecht', hand: 'Handhöhe', handruhe: 'ruhige Hände', zuegel: 'gleichmäßige Anlehnung', ellbogen: 'Ellbogen weich', bein: 'Beinlage' };
+const CAT = { kopf: ['Kopf/Hals (Nase hinter der Senkrechten)', 'Zügel länger lassen, Hand vor, Hals dehnen lassen.'], blick: ['Blick nach unten', 'Bewusst vorausschauen: nächster Buchstabe, nächste Linie.'], oberkoerper: ['Oberkörper', 'Groß machen, Schulterblätter zurück, ruhig sitzen.'], hand: ['Hände zu hoch', 'Hände tief und ruhig über dem Widerrist, Linie Ellbogen–Hand–Maul.'], zuegel: ['Zügel flackert (Hand zupft, Kopf unruhig)', 'Hand stehen lassen, gleichmäßig annehmen, nicht zupfen.'], handruhe: ['Hände unruhig', 'Hand stehen lassen, aus dem Sitz mitgehen, Bein macht die Arbeit.'], ellbogen: ['Arme gestreckt', 'Ellbogen locker an der Hüfte, Arm weich.'], bein: ['Bein/Absatz', 'Bein lang, Absatz unter die Hüfte.'] };
 
 // ---------- Anzeige ----------
 function fit() { const R = ov.getBoundingClientRect(), d = devicePixelRatio || 1; ov.width = R.width * d; ov.height = R.height * d; }
@@ -179,6 +184,7 @@ function panel(r) {
 
 // ---------- Bericht ----------
 function stopSession() {
+  if (!running) return; // Video-Ende und Stopp-Knopf dürfen nicht beide den Bericht bauen
   running = false; speechSynthesis.cancel(); unlocked = false; try { wake?.release(); } catch { }
   vid.pause(); vid.srcObject?.getTracks().forEach(t => t.stop());
   const a = stats.ang, mins = ((Date.now() - stats.start) / 60000).toFixed(1);
@@ -199,16 +205,27 @@ function stopSession() {
   if (+mins >= 0.5) { hist.push(sum); hist = hist.slice(-30); try { localStorage.setItem('rc_hist', JSON.stringify(hist)); } catch { } }
   const trend = (n, o, better) => o === null || o === undefined || n === null ? '' : n === o ? ' (=)' : ((better === 'up' ? n > o : n < o) ? ' (↑ besser als letztes Mal: ' + o + ')' : ' (↓ letztes Mal: ' + o + ')');
   rows.unshift(['Gesamtpunkte', score === null ? '–' : score + ' / 100' + trend(score, prev?.score, 'up')]);
-  rows.push(['Schrittpausen nach Arbeit', stats.walks], ['Längste Arbeitsphase ohne Pause', Math.round(stats.maxWork / 60 * 10) / 10 + ' min'], ['Technik', VERSION + ' · ' + backend + ' · ' + $('fps').textContent]);
+  rows.push(['Schrittpausen nach Arbeit', stats.walks], ['Längste Arbeitsphase ohne Pause', Math.round(stats.maxWork / 60 * 10) / 10 + ' min'], ['Quelle', src], ['Technik', VERSION + ' · ' + backend + ' · ' + $('fps').textContent]);
   const behindRow = rows.find(r => r[0] === 'Anteil hinter der Senkrechten'); if (behindRow && behind !== null) behindRow[1] += trend(behind, prev?.behind, 'down');
   $('rep').innerHTML = '<table>' + rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('') + '</table>' +
     '<h3>Schwerpunkte fürs nächste Mal</h3>' + (worst.length ? '<table>' + worst.map(([c, v]) => `<tr><td><b>${CAT[c][0]}</b> (${v} % der Zeit)<br>${CAT[c][1]}</td></tr>`).join('') + '</table>' : '<p>Keine deutlichen Schwächen erkannt.</p>') +
     (good.length ? '<h3>Das lief gut</h3><p>' + good.join(', ') + '</p>' : '') +
     '<h3>Anteil der Zeit mit Fehler je Bereich</h3><table>' + Object.entries(share).map(([c, v]) => `<tr><td>${CAT[c][0]}</td><td>${v} %${trend(v, prev?.share?.[c], 'down')}</td></tr>`).join('') + '</table>' +
     '<h3>Häufigste Korrekturen</h3><table>' + Object.entries(cnt).sort((x, y) => y[1] - x[1]).map(([k, v]) => `<tr><td>${k}</td><td>${v}×</td></tr>`).join('') + '</table>' +
-    '<h3>Verlauf (letzte Einheiten)</h3><table><tr><td>Datum</td><td>Punkte · hinter Senkr. · Min</td></tr>' + hist.slice(-8).reverse().map(h => `<tr><td>${h.d} ${h.src === 'Video' ? '(Video)' : ''}</td><td>${h.score ?? '–'} · ${h.behind ?? '–'} % · ${h.mins}</td></tr>`).join('') + '</table>' +
+    '<h3>Verlauf (letzte Einheiten)</h3><table><tr><td>Datum</td><td>Punkte · hinter Senkr. · Min</td></tr>' + hist.slice(-8).reverse().map(h => `<tr><td>${h.d} (${h.src || 'Live'})${h.rating ? ' ★' + h.rating : ''}</td><td>${h.score ?? '–'} · ${h.behind ?? '–'} % · ${h.mins}</td></tr>`).join('') + '</table>' +
     '<h3>Alle Ansagen</h3><table>' + log.map(l => `<tr><td>${l.text}</td><td>${l.t} s</td></tr>`).join('') + '</table>';
-  $('report').style.display = 'block'; $('panel').hidden = true; $('bar').hidden = true;
+  $('rep').insertAdjacentHTML('beforeend', '<h3>War es hilfreich für die Reiterin?</h3><div id="rate" style="display:flex;gap:8px;flex-wrap:wrap">' + [1, 2, 3, 4, 5].map(n => `<button data-n="${n}">${n}</button>`).join('') + '</div><div id="rate-info" style="color:#9a958b;margin-top:6px">1 = gar nicht, 5 = sehr</div>');
+  lastSum = sum; lastHist = hist;
+  $('rate').onclick = e => { const n = +e.target.dataset?.n; if (!n) return; sum.rating = n; try { localStorage.setItem('rc_hist', JSON.stringify(hist)); } catch { } $('rate-info').textContent = 'Gespeichert: ' + n + ' von 5'; };
+  $('report').style.display = 'block'; $('panel').hidden = true; $('bar').hidden = true; $('lmbar').hidden = true;
+}
+let lastSum = null, lastHist = null;
+async function shareReport() {
+  const txt = $('rep').innerText, data = { version: VERSION, summary: lastSum, bericht: txt, ansagen: log, lernmodus: learn };
+  const name = 'reitcoach_' + (lastSum?.d || 'bericht').replace(/[: ]/g, '-') + '.json';
+  const file = new File([JSON.stringify(data, null, 1)], name, { type: 'application/json' });
+  try { if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: 'Reitcoach-Bericht', text: txt.slice(0, 1500) }); return; } } catch (e) { if (e.name === 'AbortError') return; }
+  const u = URL.createObjectURL(file), l = document.createElement('a'); l.href = u; l.download = name; document.body.appendChild(l); l.click(); l.remove(); setTimeout(() => URL.revokeObjectURL(u), 5000);
 }
 
 // ---------- Bedienung ----------
@@ -216,6 +233,9 @@ $('go-cam').onclick = () => { unlock(); startSession('cam').catch(e => status('K
 $('file').onclick = () => unlock(); document.querySelector('label[for=file]').addEventListener('click', unlock);
 $('file').onchange = e => { const f = e.target.files[0]; if (f) startSession(f).catch(e => status('Video-Fehler: ' + e.message)); };
 $('stop').onclick = stopSession;
+$('lm').onclick = () => { learnOn = !learnOn; $('lm').textContent = learnOn ? 'Lernmodus an' : 'Lernmodus'; $('lmbar').hidden = !learnOn; };
+for (const [id, label] of [['lm-ok', 'korrekt'], ['lm-push', 'drückt raus'], ['lm-behind', 'dahinter'], ['lm-flick', 'flackert']]) $(id).onclick = () => mark(label);
+$('share').onclick = shareReport;
 $('mute').onclick = () => { muted = !muted; $('mute').textContent = muted ? 'Ton aus' : 'Ton an'; if (muted) speechSynthesis.cancel(); };
 $('freq').onchange = () => Object.assign(coach.opt, FREQ[$('freq').value]);
 $('test').onclick = () => { unlock(); speak('Hand vor, Nase raus.'); };

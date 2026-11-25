@@ -39,6 +39,10 @@ button:focus-visible,select:focus-visible{outline:3px solid var(--sand)}
 #report table{border-collapse:collapse;width:100%;margin:10px 0}
 #report td{padding:6px 4px;border-bottom:1px solid #333}#report td+td{text-align:right}
 input[type=file]{display:none}
+#lmbar{position:absolute;right:8px;top:calc(env(safe-area-inset-top) + 8px);display:flex;flex-direction:column;gap:8px;max-width:46%}
+#lmbar[hidden]{display:none}
+#lmbar button{min-height:54px;font-weight:700}
+#lm-info{background:#000a;border-radius:8px;padding:4px 8px;font-size:13px;color:var(--sand)}
 @media (prefers-reduced-motion:no-preference){#banner{transition:opacity .3s}}
 </style>
 </head>
@@ -56,6 +60,13 @@ input[type=file]{display:none}
     <div class="row"><span>Reiter: Fuß vor Hüfte</span><span class="v" id="m-heel">–</span></div>
     <div id="fps"></div><div id="cnt">Ansagen: 0</div><div id="snd">Ton: noch nicht geprüft</div>
   </div>
+  <div id="lmbar" hidden>
+    <button id="lm-ok" style="background:#25874b">✓ Korrekt</button>
+    <button id="lm-push" style="background:#b8322a">↑ Drückt raus</button>
+    <button id="lm-behind" style="background:#9a6a1a">↓ Dahinter</button>
+    <button id="lm-flick" style="background:#24599b">〰 Flackert</button>
+    <div id="lm-info">Lernmodus: tippen, wenn es passiert</div>
+  </div>
   <div id="banner"></div>
   <div id="bar" hidden>
     <button id="stop" class="main">Stopp &amp; Bericht</button>
@@ -66,6 +77,7 @@ input[type=file]{display:none}
       <option value="viel">Ansagen: viel</option>
     </select>
     <button id="test">Testansage</button>
+    <button id="lm">Lernmodus</button>
   </div>
 </div>
 
@@ -88,6 +100,7 @@ input[type=file]{display:none}
   <div id="rep"></div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
     <button id="copy">Bericht kopieren</button>
+    <button id="share">Bericht teilen</button>
     <button id="again" class="main">Neue Einheit</button>
   </div>
 </div>
