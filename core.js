@@ -224,7 +224,7 @@ export class Coach {
     m.wjit = null;
     if (hw.length >= 6) { const d = hw.map((x, i) => { const nb = hw.filter(y => Math.abs(y.t - x.t) <= 0.6).map(y => y.hand); return x.hand - nb.reduce((s, v) => s + v, 0) / nb.length; }); m.wjit = std(d); }
     const av = win.filter(x => x.ang !== undefined).map(x => x.ang); m.angsd = av.length >= 6 ? std(av) : null;
-    m.flick = m.wjit !== null && m.angsd !== null && m.wjit > 0.045 && m.angsd > 4 ? 1 : 0;
+    m.flick = m.wjit !== null && m.angsd !== null ? (m.wjit > 0.045 && m.angsd > 4 ? 1 : 0) : null;
     r.m = m;
     // Gangart (jede Sekunde neu)
     if (t - this.lastGaitCalc >= 1) {

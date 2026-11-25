@@ -9,7 +9,7 @@ const status = t => $('status').textContent = t;
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
 let seg, pose;
-const VERSION = 'v1.9';
+const VERSION = 'v1.9.1';
 let backend = 'CPU';
 const ready = (async () => {
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
@@ -117,12 +117,15 @@ async function startSession(src) {
     vid.muted = true; vid.srcObject = st;
   } else { vid.srcObject = null; vid.muted = true; vid.src = URL.createObjectURL(src); vid.loop = false; }
   await vid.play();
+  if (!vid.srcObject) { vid.pause(); vid.currentTime = 0; } // Datei: Bild fuer Bild (VIDEO_STEP), nicht in Echtzeit
   try { wake = await navigator.wakeLock?.request('screen'); } catch { }
   $('start').style.display = 'none'; $('panel').hidden = false; $('bar').hidden = false; $('report').style.display = 'none'; $('lmbar').hidden = !learnOn;
   coach = new Coach(FREQ[$('freq').value]); resetStats(); log = []; running = true; t0 = performance.now();
   vid.onended = () => stopSession();
   loop();
 }
+const VIDEO_STEP = 0.25; // Sekunden Videozeit je Auswertung (= 4 Bilder/s, immer gleich, egal wie schnell der Rechner ist)
+const seek = x => new Promise(res => { let to; const done = () => { vid.removeEventListener('seeked', done); clearTimeout(to); res(); }; to = setTimeout(done, 3000); vid.addEventListener('seeked', done); vid.currentTime = x; });
 async function loop() {
   let n = 0, tf = performance.now();
   while (running) {
@@ -132,6 +135,11 @@ async function loop() {
     last = r; record(r); sample(r); draw(r); panel(r);
     if (r.msg) { banner = { msg: r.msg, t }; say(r.msg[0]); $('cnt').textContent = 'Ansagen: ' + (log.length + 1); log.push({ t: Math.round(t), text: r.msg[0], kind: r.msg[1] }); }
     n++; const now = performance.now(); if (now - tf > 2000) { $('fps').textContent = (n * 1000 / (now - tf)).toFixed(1) + ' Bilder/s'; n = 0; tf = now; }
+    if (!vid.srcObject) { // Datei: nächstes Bild holen, am Ende Bericht
+      const nt = t + VIDEO_STEP;
+      if (!isFinite(vid.duration) || nt >= vid.duration - 0.05) { stopSession(); break; }
+      await seek(nt); $('cnt').textContent = 'Ansagen: ' + log.length + ' · Video ' + Math.round(nt) + ' / ' + Math.round(vid.duration) + ' s';
+    }
     await new Promise(r => setTimeout(r, 0));
   }
 }
@@ -187,7 +195,7 @@ function stopSession() {
   if (!running) return; // Video-Ende und Stopp-Knopf dürfen nicht beide den Bericht bauen
   running = false; speechSynthesis.cancel(); unlocked = false; try { wake?.release(); } catch { }
   vid.pause(); vid.srcObject?.getTracks().forEach(t => t.stop());
-  const a = stats.ang, mins = ((Date.now() - stats.start) / 60000).toFixed(1);
+  const a = stats.ang, mins = (!vid.srcObject && isFinite(vid.currentTime) ? vid.currentTime / 60 : (Date.now() - stats.start) / 60000).toFixed(1);
   const behind = a.length ? Math.round(100 * a.filter(v => v < -5).length / a.length) : null;
   const med = a.length ? [...a].sort((x, y) => x - y)[a.length >> 1].toFixed(0) : '–';
   const gsum = Object.values(stats.gait).reduce((s, v) => s + v, 0) || 1;
