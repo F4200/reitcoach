@@ -111,7 +111,7 @@ let coach = new Coach(FREQ.normal), running = false, t0 = 0, last = null, banner
 function resetStats() { learn = { samples: [], marks: [] }; lastSampleT = -9; stats = { frames: 0, horse: 0, ang: [], gait: {}, msgs: [], start: Date.now(), fault: {}, seen: {}, work: 0, maxWork: 0, lastT: null, walks: 0, prevG: null }; }
 
 async function startSession(src) {
-  try { const d = JSON.parse(localStorage.getItem('rc_last') || 'null'); if (d && !d.sent && confirm('Der letzte Bericht (' + (d.summary?.d || '') + ') wurde noch nicht geteilt. OK = jetzt teilen, Abbrechen = trotzdem starten.')) { await sendData(d, false); return; } } catch { }
+  try { const d = JSON.parse(localStorage.getItem('rc_last') || 'null'); if (d && !d.sent && confirm('Der letzte Bericht (' + (d.summary?.d || '') + ') wurde noch nicht geteilt. OK = jetzt teilen, Abbrechen = trotzdem starten.')) await sendData(d, false); } catch { }
   await ready; if (!seg) return;
   if (src === 'cam') {
     const st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
@@ -226,22 +226,24 @@ function stopSession() {
   $('rep').insertAdjacentHTML('beforeend', '<h3>War es hilfreich für die Reiterin?</h3><div id="rate" style="display:flex;gap:8px;flex-wrap:wrap">' + [1, 2, 3, 4, 5].map(n => `<button data-n="${n}">${n}</button>`).join('') + '</div><div id="rate-info" style="color:#9a958b;margin-top:6px">1 = gar nicht, 5 = sehr</div>');
   lastSum = sum; lastHist = hist;
   $('rate').onclick = e => { const n = +e.target.dataset?.n; if (!n) return; sum.rating = n; try { localStorage.setItem('rc_hist', JSON.stringify(hist)); } catch { } $('rate-info').textContent = 'Gespeichert: ' + n + ' von 5'; };
-  try { localStorage.setItem('rc_last', JSON.stringify({ version: VERSION, summary: sum, bericht: $('rep').innerText, ansagen: log, lernmodus: learn, sent: false })); } catch { }
-  setTimeout(() => { try { sendData(JSON.parse(localStorage.getItem('rc_last')), true); } catch { } }, 300);
+  const cur = { version: VERSION, summary: sum, bericht: $('rep').innerText, ansagen: log, lernmodus: learn, sent: false }; lastData = cur;
+  // Speicher voll: ohne Lernmodus-Daten versuchen, sonst alten Eintrag entfernen (nie einen alten Bericht weiterreichen)
+  try { localStorage.setItem('rc_last', JSON.stringify(cur)); } catch { try { localStorage.setItem('rc_last', JSON.stringify({ ...cur, lernmodus: null, gekuerzt: true })); } catch { try { localStorage.removeItem('rc_last'); } catch { } } }
+  setTimeout(() => { sendData(cur, true).catch(() => { }); }, 300);
   $('report').style.display = 'block'; $('panel').hidden = true; $('bar').hidden = true; $('lmbar').hidden = true;
 }
-let lastSum = null, lastHist = null;
+let lastSum = null, lastHist = null, lastData = null;
 async function sendData(data, auto) {
   const txt = data.bericht || '';
   const name = 'reitcoach_' + (data.summary?.d || 'bericht').replace(/[: ]/g, '-') + '.json';
   const file = new File([JSON.stringify(data, null, 1)], name, { type: 'application/json' });
-  if (!auto) { try { if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: 'Reitcoach-Bericht', text: txt.slice(0, 1500) }); markSent(); return; } } catch (e) { if (e.name === 'AbortError') return; } }
+  if (!auto) { try { if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: 'Reitcoach-Bericht', text: txt.slice(0, 1500) }); markSent(data); return; } } catch (e) { if (e.name === 'AbortError') return; } }
   const u = URL.createObjectURL(file), l = document.createElement('a'); l.href = u; l.download = name; document.body.appendChild(l); l.click(); l.remove(); setTimeout(() => URL.revokeObjectURL(u), 5000);
-  if (!auto) markSent();
+  if (!auto) markSent(data);
 }
-function markSent() { try { const d = JSON.parse(localStorage.getItem('rc_last') || 'null'); if (d) { d.sent = true; localStorage.setItem('rc_last', JSON.stringify(d)); } } catch { } }
+function markSent(data) { data.sent = true; try { const d = JSON.parse(localStorage.getItem('rc_last') || 'null'); if (d && d.summary?.d === data.summary?.d) { d.sent = true; localStorage.setItem('rc_last', JSON.stringify(d)); } } catch { } }
 async function shareReport() {
-  let d; try { d = JSON.parse(localStorage.getItem('rc_last') || 'null'); } catch { }
+  let d = lastData; if (!d) try { d = JSON.parse(localStorage.getItem('rc_last') || 'null'); } catch { }
   if (!d) d = { version: VERSION, summary: lastSum, bericht: $('rep').innerText, ansagen: log, lernmodus: learn };
   else { d.summary = lastSum || d.summary; d.bericht = $('rep').innerText || d.bericht; }
   await sendData(d, false);
@@ -250,7 +252,7 @@ async function shareReport() {
 // ---------- Bedienung ----------
 $('go-cam').onclick = () => { unlock(); startSession('cam').catch(e => status('Kamera nicht verfügbar: ' + e.message)); };
 $('file').onclick = () => unlock(); document.querySelector('label[for=file]').addEventListener('click', unlock);
-$('file').onchange = e => { const f = e.target.files[0]; if (f) startSession(f).catch(e => status('Video-Fehler: ' + e.message)); };
+$('file').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) startSession(f).catch(e => status('Video-Fehler: ' + e.message)); };
 $('stop').onclick = stopSession;
 $('lm').onclick = () => { learnOn = !learnOn; $('lm').textContent = learnOn ? 'Lernmodus an' : 'Lernmodus'; $('lmbar').hidden = !learnOn; };
 for (const [id, label] of [['lm-ok', 'korrekt'], ['lm-push', 'drückt raus'], ['lm-behind', 'dahinter'], ['lm-flick', 'flackert']]) $(id).onclick = () => mark(label);
