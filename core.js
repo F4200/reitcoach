@@ -143,7 +143,7 @@ export const RULES = [
   ['lean', v => v > 6, ['Oberkörper aufrichten.', 'Mach dich groß, Schulterblätter zurück.', 'Ruhig sitzen bleiben, nicht vorbeugen.'], 'oberkoerper'],
   ['lean', v => v < -8, ['Nicht nach hinten lehnen, senkrecht sitzen.'], 'oberkoerper'],
   ['hand', v => v > 0.16, ['Hände tiefer.', 'Hände ruhig über dem Widerrist tragen.', 'Hand, Ellbogen, Maul: eine Linie.'], 'hand'],
-  ['wjit', v => v > 0.045, ['Hände ruhig halten.', 'Hände stehen lassen, nicht mitwackeln.', 'Hand ruhig, das Bein macht die Arbeit.'], 'handruhe'],
+  ['wjit', v => v > 0.11, ['Hände ruhig halten.', 'Hände stehen lassen, nicht mitwackeln.', 'Hand ruhig, das Bein macht die Arbeit.'], 'handruhe'],
   ['flick', v => v > 0.5, ['Zügel gleichmäßig dran lassen, nicht zupfen.'], 'zuegel'],
   ['elbow', v => v > 146, ['Ellbogen anwinkeln, locker an den Körper.', 'Arme nicht strecken, Ellbogen weich.', 'Ellbogen an die Hüfte, ganz locker.'], 'ellbogen'],
   ['heel', v => v > 0.36, ['Absatz unter die Hüfte, Bein zurück.', 'Bein lang, Absatz tief.', 'Bein ruhig dran lassen.'], 'bein'],
@@ -224,7 +224,7 @@ export class Coach {
     m.wjit = null;
     if (hw.length >= 6) { const d = hw.map((x, i) => { const nb = hw.filter(y => Math.abs(y.t - x.t) <= 0.6).map(y => y.hand); return x.hand - nb.reduce((s, v) => s + v, 0) / nb.length; }); m.wjit = std(d); }
     const av = win.filter(x => x.ang !== undefined).map(x => x.ang); m.angsd = av.length >= 6 ? std(av) : null;
-    m.flick = m.wjit !== null && m.angsd !== null ? (m.wjit > 0.045 && m.angsd > 4 ? 1 : 0) : null;
+    m.flick = m.wjit !== null && m.angsd !== null ? (m.wjit > 0.11 && m.angsd > 14 ? 1 : 0) : null;
     r.m = m;
     // Gangart (jede Sekunde neu)
     if (t - this.lastGaitCalc >= 1) {
@@ -241,20 +241,23 @@ export class Coach {
     let msg = null;
     if (this.t0 === undefined) this.t0 = t;
     const warm = t - this.t0 < 5;
+    // Obergrenze je Minute: gilt für alle Ansagen außer Gangartwechsel
+    this.said = (this.said || []).filter(x => x > t - 60);
+    const capped = this.said.length >= (o.maxPerMin ?? 5);
     if (t - (this._stT ?? -99) >= 1) { this._stT = t; this._stable = (this._stable || []).concat([this.gait]).slice(-4); }
     const stable = this._stable.length === 4 && this._stable[0] && this._stable.every(g => g === this._stable[0]) ? this._stable[0] : null;
     if (stable && stable !== this.prevGait && t - this.lastAny > 3 && t - (this.last.gait ?? -99) > 10) { this.last.gait = t; const first = this.prevGait === null; this.prevGait = stable; if (!first) { const prev = this._lastG; msg = [prev && RANK[stable] < RANK[prev] && stable !== 'Halt' ? pick(DOWN_SAY) : pick(GAIT_SAY[stable]), 'info']; } this._lastG = stable; if (stable === 'Schritt' || stable === 'Halt') { this.walkSince = t; this.walkSaid = false; this.lastWalk = t; } }
     if (!msg && this.gw && TEMPO[this.gait] && t - this.lastGaitCalc < 0.01) {
       const g = this.gait, f = this.gw.asp_f; this.baseG = this.baseG || {}; const B = (this.baseG[g] = (this.baseG[g] || []).concat([f]).slice(-40)); const bf = median(B);
-      if (B.length > 15 && t - (this.last.tempo ?? -99) > o.gapCat && t - this.lastAny > o.gapAny) {
+      if (B.length > 15 && !capped && t - (this.last.tempo ?? -99) > o.gapCat && t - this.lastAny > o.gapAny) {
         if (f > bf * 1.08) { msg = [pick(TEMPO[g].fast), 'c']; this.last.tempo = t; }
         else if (f < bf * 0.92) { msg = [pick(TEMPO[g].slow), 'c']; this.last.tempo = t; }
       }
     }
     // Jungpferd: Pausen im Schritt nutzen, nach langer Arbeit an Pause erinnern
     if (this.lastWalk === undefined) this.lastWalk = t;
-    if (!msg && this.gait === 'Schritt' && this.walkSince !== undefined && !this.walkSaid && t - this.walkSince > 25 && t - this.lastAny > o.gapAny) { msg = ['Pause gut nutzen, Zügel ganz hingeben.', 'info']; this.walkSaid = true; }
-    if (!msg && (this.gait === 'Trab' || this.gait === 'Galopp') && t - this.lastWalk > 300 && t - (this.last.pause ?? -99) > 120 && t - this.lastAny > o.gapAny) { msg = ['Denk an eine Schrittpause für sie.', 'info']; this.last.pause = t; }
+    if (!msg && !capped && this.gait === 'Schritt' && this.walkSince !== undefined && !this.walkSaid && t - this.walkSince > 25 && t - this.lastAny > o.gapAny) { msg = ['Pause gut nutzen, Zügel ganz hingeben.', 'info']; this.walkSaid = true; }
+    if (!msg && !capped && (this.gait === 'Trab' || this.gait === 'Galopp') && t - this.lastWalk > 300 && t - (this.last.pause ?? -99) > 120 && t - this.lastAny > o.gapAny) { msg = ['Denk an eine Schrittpause für sie.', 'info']; this.last.pause = t; }
     let faults = RULES.filter(([k, test]) => m[k] !== null && m[k] !== undefined && test(m[k]));
     // Kopf: Hysterese (Korrektur unter -16 Grad, Entwarnung erst über -13 Grad)
     if (m.ang !== null && m.ang !== undefined) { if (m.ang < -16) this._kopfBad = true; else if (m.ang > -13) this._kopfBad = false; }
@@ -264,16 +267,14 @@ export class Coach {
     this._fc = this._fc || {}; const seenCat = new Set(faults.map(f => f[3]));
     for (const cat of ['bein', 'oberkoerper']) this._fc[cat] = seenCat.has(cat) ? (this._fc[cat] || 0) + 1 : 0;
     faults = faults.filter(f => !['bein', 'oberkoerper'].includes(f[3]) || this._fc[f[3]] >= 12);
-    this.said = (this.said || []).filter(x => x > t - 60);
-    const capped = this.said.length >= (o.maxPerMin ?? 5);
-    if (!msg && t - this.lastAny > o.gapAny && t - this.lastPraise > o.gapPraise && m.ang !== null && m.ang > -9 && m.ang < 12 && faults.length <= 1 && !faults.some(f => ['kopf', 'zuegel', 'handruhe'].includes(f[3]))) { msg = [pick(PRAISE), 'p']; this.lastPraise = t; }
+    if (!msg && !capped && t - this.lastAny > o.gapAny && t - this.lastPraise > o.gapPraise && m.ang !== null && m.ang > -9 && m.ang < 12 && faults.length <= 1 && !faults.some(f => ['kopf', 'zuegel', 'handruhe'].includes(f[3]))) { msg = [pick(PRAISE), 'p']; this.lastPraise = t; }
     if (!msg && !capped && t - this.lastAny > o.gapAny) {
       const slow = c2 => ['bein', 'oberkoerper'].includes(c2) ? (o.gapCatSlow ?? o.gapCat * 2) : (c2 === 'blick' ? Math.min(o.gapCat, 12) : o.gapCat);
       const due = faults.filter(f => t - (this.last[f[3]] ?? -99) > slow(f[3])).sort((a, b) => (this.last[a[3]] ?? -99) - (this.last[b[3]] ?? -99));
       if (due.length) { const [, , ph, cat] = due[0]; msg = [pick(ph), 'c']; this.last[cat] = t; }
     }
     if (warm) msg = null;
-    if (msg) { this.lastAny = t; if (msg[1] === 'c' || msg[1] === 'p') this.said.push(t); }
+    if (msg) { this.lastAny = t; this.said.push(t); }
     r.msg = msg;
     return r;
   }
